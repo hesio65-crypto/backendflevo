@@ -1,6 +1,7 @@
 const express = require("express");
 const axios = require("axios");
 const crypto = require("crypto");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 app.use(express.json());
@@ -19,6 +20,40 @@ const DI_LOGIN = process.env.DI_LOGIN;
 const DI_PASSWORD = process.env.DI_PASSWORD;
 
 /* =========================
+   SUPABASE
+========================= */
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+
+/* =========================
+   ADMIN AUTH
+========================= */
+const ADMIN_USER = process.env.ADMIN_USER || "admin";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+
+function requireAdminAuth(req, res, next) {
+  if (!ADMIN_PASSWORD) {
+    return res.status(500).send("ADMIN_PASSWORD não configurada no ambiente.");
+  }
+
+  const header = req.headers.authorization || "";
+  const [scheme, encoded] = header.split(" ");
+
+  if (scheme !== "Basic" || !encoded) {
+    res.set("WWW-Authenticate", 'Basic realm="Admin"');
+    return res.status(401).send("Autenticação necessária.");
+  }
+
+  const [user, password] = Buffer.from(encoded, "base64").toString().split(":");
+
+  if (user !== ADMIN_USER || password !== ADMIN_PASSWORD) {
+    res.set("WWW-Authenticate", 'Basic realm="Admin"');
+    return res.status(401).send("Credenciais inválidas.");
+  }
+
+  next();
+}
+
+/* =========================
    PLANOS
 ========================= */
 const planos = {
@@ -31,12 +66,6 @@ const planos = {
   50: 251,
   100: 466
 };
-
-/* =========================
-   MEMÓRIA
-========================= */
-const pagamentos = {};
-const vendas = [];
 
 /* =========================
    FUNÇÕES
@@ -114,15 +143,19 @@ app.post("/criar-pix", async (req, res) => {
     document: gerarCPF()
   };
 
-  vendas.push({
+  const { error: insertError } = await supabase.from("vendas").insert({
     txid,
     subuser_id,
     gigas,
     valor,
     telefone,
-    status: "PENDENTE",
-    data: new Date()
+    status: "PENDENTE"
   });
+
+  if (insertError) {
+    console.log("erro ao salvar venda:", insertError.message);
+    return res.json({ erro: "erro ao registrar venda" });
+  }
 
   try {
     const response = await axios.post(
@@ -142,12 +175,6 @@ app.post("/criar-pix", async (req, res) => {
         }
       }
     );
-
-    pagamentos[txid] = {
-      subuser_id,
-      gigas,
-      status: "PENDENTE"
-    };
 
     res.json({
       txid,
@@ -169,25 +196,24 @@ app.post("/webhook/flevo", async (req, res) => {
     const { external_id, status } = req.body;
 
     if (!external_id) return res.sendStatus(200);
-    if (!pagamentos[external_id]) return res.sendStatus(200);
-
-    const pagamento = pagamentos[external_id];
-
     if (status !== "approved") return res.sendStatus(200);
-    if (pagamento.status !== "PENDENTE") return res.sendStatus(200);
 
-    pagamento.status = "PROCESSANDO";
+    const { data: venda, error: fetchError } = await supabase
+      .from("vendas")
+      .select("*")
+      .eq("txid", external_id)
+      .single();
 
-    const { subuser_id, gigas } = pagamento;
+    if (fetchError || !venda) return res.sendStatus(200);
+    if (venda.status !== "PENDENTE") return res.sendStatus(200);
 
-    const venda = vendas.find(v => v.txid === external_id);
-    if (venda) venda.status = "PAGO";
+    await supabase.from("vendas").update({ status: "PROCESSANDO" }).eq("txid", external_id);
 
     try {
-      await recarregarProxy(subuser_id, gigas);
-      pagamento.status = "CONCLUIDO";
+      await recarregarProxy(venda.subuser_id, venda.gigas);
+      await supabase.from("vendas").update({ status: "CONCLUIDO" }).eq("txid", external_id);
     } catch (err) {
-      pagamento.status = "ERRO";
+      await supabase.from("vendas").update({ status: "ERRO" }).eq("txid", external_id);
     }
 
     res.sendStatus(200);
@@ -200,8 +226,67 @@ app.post("/webhook/flevo", async (req, res) => {
 /* =========================
    ADMIN
 ========================= */
-app.get("/admin/vendas", (req, res) => {
-  res.json(vendas);
+app.get("/admin/vendas", requireAdminAuth, async (req, res) => {
+  const { data: vendas, error } = await supabase
+    .from("vendas")
+    .select("*")
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    return res.status(500).send("Erro ao carregar vendas: " + error.message);
+  }
+
+  const linhas = vendas.map(v => `
+    <tr>
+      <td>${v.txid}</td>
+      <td>${v.subuser_id}</td>
+      <td>${v.gigas} GB</td>
+      <td>R$ ${v.valor}</td>
+      <td>${v.telefone || "-"}</td>
+      <td class="status-${v.status.toLowerCase()}">${v.status}</td>
+      <td>${new Date(v.created_at).toLocaleString("pt-BR")}</td>
+    </tr>
+  `).join("");
+
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+      <meta charset="UTF-8">
+      <title>Vendas - Admin</title>
+      <style>
+        body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; padding: 2rem; }
+        h1 { margin-bottom: 1rem; }
+        table { width: 100%; border-collapse: collapse; background: #1e293b; }
+        th, td { padding: 0.6rem 1rem; text-align: left; border-bottom: 1px solid #334155; }
+        th { background: #334155; }
+        .status-pendente { color: #facc15; }
+        .status-processando { color: #38bdf8; }
+        .status-concluido { color: #4ade80; }
+        .status-erro { color: #f87171; }
+      </style>
+    </head>
+    <body>
+      <h1>Vendas</h1>
+      <table>
+        <thead>
+          <tr>
+            <th>TXID</th>
+            <th>Subuser ID</th>
+            <th>Plano</th>
+            <th>Valor</th>
+            <th>Telefone</th>
+            <th>Status</th>
+            <th>Data</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${linhas}
+        </tbody>
+      </table>
+    </body>
+    </html>
+  `);
 });
 
 /* =========================
