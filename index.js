@@ -6,16 +6,17 @@ const app = express();
 app.use(express.json());
 
 /* =========================
-   PARADISE CONFIG
+   FLEVO CONFIG
 ========================= */
-const PARADISE_API_KEY = "sk_b6ded86ad8e35617f29b65ffe00a0305a38c6063c76b68fb7e405ec1237a3d0d";
-const PARADISE_URL = "https://multi.paradisepags.com/api/v1/transaction.php";
+const FLEVO_API_KEY = process.env.FLEVO_API_KEY;
+const FLEVO_URL = "https://app.flevopay.com.br/api/v1/transaction";
+const FLEVO_POSTBACK_URL = process.env.FLEVO_POSTBACK_URL || "https://backendflevo-production.up.railway.app/webhook/flevo";
 
 /* =========================
    DATAIMPULSE
 ========================= */
-const DI_LOGIN = "thayslima270319@gmail.com";
-const DI_PASSWORD = "fVyIYoCRbCVd4OKPsPAHjB8gzK76MAbF";
+const DI_LOGIN = process.env.DI_LOGIN;
+const DI_PASSWORD = process.env.DI_PASSWORD;
 
 /* =========================
    PLANOS
@@ -97,7 +98,7 @@ async function recarregarProxy(subuser_id, gigas) {
    CRIAR PIX
 ========================= */
 app.post("/criar-pix", async (req, res) => {
-  const { subuser_id, gigas, telefone } = req.body; // ✅ NOVO
+  const { subuser_id, gigas, telefone } = req.body;
 
   if (!planos[gigas]) {
     return res.json({ erro: "plano inválido" });
@@ -109,7 +110,7 @@ app.post("/criar-pix", async (req, res) => {
   const cliente = {
     name: "Cliente Proxy",
     email: `cliente_${txid}@proxy.com`,
-    phone: telefone || "11999999999", // ✅ USA WHATSAPP
+    phone: telefone || "11999999999",
     document: gerarCPF()
   };
 
@@ -118,25 +119,25 @@ app.post("/criar-pix", async (req, res) => {
     subuser_id,
     gigas,
     valor,
-    telefone, // ✅ SALVA WHATSAPP
+    telefone,
     status: "PENDENTE",
     data: new Date()
   });
 
   try {
     const response = await axios.post(
-      PARADISE_URL,
+      FLEVO_URL,
       {
         amount: valor * 100,
         description: "Recarga Proxy",
         reference: txid,
         source: "api_externa",
         customer: cliente,
-        postback_url: "https://backendparadise-production.up.railway.app/webhook/paradise"
+        postback_url: FLEVO_POSTBACK_URL
       },
       {
         headers: {
-          "X-API-Key": PARADISE_API_KEY,
+          "X-API-Key": FLEVO_API_KEY,
           "Content-Type": "application/json"
         }
       }
@@ -163,7 +164,7 @@ app.post("/criar-pix", async (req, res) => {
 /* =========================
    WEBHOOK
 ========================= */
-app.post("/webhook/paradise", async (req, res) => {
+app.post("/webhook/flevo", async (req, res) => {
   try {
     const { external_id, status } = req.body;
 
