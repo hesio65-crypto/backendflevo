@@ -12,7 +12,7 @@ app.use(express.json());
 const MISTIC_CLIENT_ID = process.env.MISTIC_CLIENT_ID;
 const MISTIC_CLIENT_SECRET = process.env.MISTIC_CLIENT_SECRET;
 const MISTIC_URL = "https://api.misticpay.com/api/transactions/create";
-const MISTIC_POSTBACK_URL = process.env.MISTIC_POSTBACK_URL || "https://backendflevo-production.up.railway.app/webhook/mistic";
+const MISTIC_POSTBACK_URL = process.env.MISTIC_POSTBACK_URL || "https://backendmistic-production.up.railway.app/webhook/mistic";
 
 /* =========================
    DATAIMPULSE
