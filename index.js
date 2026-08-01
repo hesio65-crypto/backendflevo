@@ -7,11 +7,12 @@ const app = express();
 app.use(express.json());
 
 /* =========================
-   FLEVO CONFIG
+   MISTIC PAY CONFIG
 ========================= */
-const FLEVO_API_KEY = process.env.FLEVO_API_KEY;
-const FLEVO_URL = "https://app.flevopay.com.br/api/v1/transaction";
-const FLEVO_POSTBACK_URL = process.env.FLEVO_POSTBACK_URL || "https://backendflevo-production.up.railway.app/webhook/flevo";
+const MISTIC_CLIENT_ID = process.env.MISTIC_CLIENT_ID;
+const MISTIC_CLIENT_SECRET = process.env.MISTIC_CLIENT_SECRET;
+const MISTIC_URL = "https://api.misticpay.com/api/transactions/create";
+const MISTIC_POSTBACK_URL = process.env.MISTIC_POSTBACK_URL || "https://backendflevo-production.up.railway.app/webhook/mistic";
 
 /* =========================
    DATAIMPULSE
@@ -136,13 +137,6 @@ app.post("/criar-pix", async (req, res) => {
   const valor = planos[gigas];
   const txid = gerarTxid();
 
-  const cliente = {
-    name: "Cliente Proxy",
-    email: `cliente_${txid}@proxy.com`,
-    phone: telefone || "11999999999",
-    document: gerarCPF()
-  };
-
   const { error: insertError } = await supabase.from("vendas").insert({
     txid,
     subuser_id,
@@ -159,27 +153,35 @@ app.post("/criar-pix", async (req, res) => {
 
   try {
     const response = await axios.post(
-      FLEVO_URL,
+      MISTIC_URL,
       {
-        amount: valor * 100,
+        amount: valor,
+        payerName: "Cliente Proxy",
+        payerDocument: gerarCPF(),
+        transactionId: txid,
         description: "Recarga Proxy",
-        reference: txid,
-        source: "api_externa",
-        customer: cliente,
-        postback_url: FLEVO_POSTBACK_URL
+        projectWebhook: MISTIC_POSTBACK_URL
       },
       {
         headers: {
-          "X-API-Key": FLEVO_API_KEY,
+          ci: MISTIC_CLIENT_ID,
+          cs: MISTIC_CLIENT_SECRET,
           "Content-Type": "application/json"
         }
       }
     );
 
+    const misticTransactionId = String(response.data.data.transactionId);
+
+    await supabase
+      .from("vendas")
+      .update({ gateway_transaction_id: misticTransactionId })
+      .eq("txid", txid);
+
     res.json({
       txid,
-      pix: response.data.qr_code,
-      qrcode: response.data.qr_code_base64
+      pix: response.data.data.copyPaste,
+      qrcode: response.data.data.qrCodeBase64
     });
 
   } catch (err) {
@@ -191,29 +193,29 @@ app.post("/criar-pix", async (req, res) => {
 /* =========================
    WEBHOOK
 ========================= */
-app.post("/webhook/flevo", async (req, res) => {
+app.post("/webhook/mistic", async (req, res) => {
   try {
-    const { external_id, status } = req.body;
+    const { transactionId, status } = req.body;
 
-    if (!external_id) return res.sendStatus(200);
-    if (status !== "approved") return res.sendStatus(200);
+    if (!transactionId) return res.sendStatus(200);
+    if (status !== "COMPLETO") return res.sendStatus(200);
 
     const { data: venda, error: fetchError } = await supabase
       .from("vendas")
       .select("*")
-      .eq("txid", external_id)
+      .eq("gateway_transaction_id", String(transactionId))
       .single();
 
     if (fetchError || !venda) return res.sendStatus(200);
     if (venda.status !== "PENDENTE") return res.sendStatus(200);
 
-    await supabase.from("vendas").update({ status: "PROCESSANDO" }).eq("txid", external_id);
+    await supabase.from("vendas").update({ status: "PROCESSANDO" }).eq("txid", venda.txid);
 
     try {
       await recarregarProxy(venda.subuser_id, venda.gigas);
-      await supabase.from("vendas").update({ status: "CONCLUIDO" }).eq("txid", external_id);
+      await supabase.from("vendas").update({ status: "CONCLUIDO" }).eq("txid", venda.txid);
     } catch (err) {
-      await supabase.from("vendas").update({ status: "ERRO" }).eq("txid", external_id);
+      await supabase.from("vendas").update({ status: "ERRO" }).eq("txid", venda.txid);
     }
 
     res.sendStatus(200);
